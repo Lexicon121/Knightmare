@@ -1,11 +1,14 @@
 # c2/server.py — Knightmare C2 Server
 #
 # Two listeners:
-#   AGENT_PORT    — reverse connections from Knightmare / TMS agents
+#   AGENT_PORT    — reverse TLS connections from Knightmare / TMS agents
 #   OPERATOR_PORT — operator consoles (multi-operator, shared sessions)
 #
-# Session locking: only ONE operator may interact with an agent at a time.
-# Other operators may observe but cannot send commands to a locked session.
+# Key behaviours:
+#   • Session locking  — one operator interacts with one agent at a time
+#   • Task assignment  — operators assign roles (kismet, bettercap, etc.) to agents
+#   • Broadcast        — send a command to all agents or a filtered subset
+#   • Data store       — agents push parsed findings; operators query the store
 
 import asyncio
 import ssl
@@ -13,6 +16,7 @@ import os
 import uuid
 import logging
 import datetime
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -38,6 +42,7 @@ class Session:
     user: str
     capabilities: list
     connected_at: str
+    role: str                       # current assigned task role
     locked_by: Optional[str]        # operator id currently interacting
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
@@ -51,6 +56,7 @@ class Session:
             "user":         self.user,
             "capabilities": self.capabilities,
             "connected_at": self.connected_at,
+            "role":         self.role,
             "locked_by":    self.locked_by,
         }
 
@@ -60,7 +66,7 @@ class Operator:
     id: str
     name: str
     connected_at: str
-    session_id: Optional[str]       # session currently interacting with
+    session_id: Optional[str]
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -72,6 +78,55 @@ class Operator:
             "connected_at": self.connected_at,
             "session_id":   self.session_id,
         }
+
+
+class DataStore:
+    """
+    In-memory store for structured findings pushed by agents.
+
+    Records are keyed by category. Each record carries the source
+    session_id, hostname, and UTC timestamp so operators can see
+    which unit produced which data.
+    """
+
+    def __init__(self):
+        # { category: [ {session_id, hostname, timestamp, ...record_fields} ] }
+        self._store: dict[str, list] = defaultdict(list)
+        self._lock  = asyncio.Lock()
+
+    async def ingest(self, session_id: str, hostname: str,
+                     category: str, records: list):
+        ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        tagged = [
+            {"session_id": session_id, "hostname": hostname,
+             "timestamp": ts, **r}
+            for r in records
+        ]
+        async with self._lock:
+            self._store[category].extend(tagged)
+            # Rolling window — keep last 10 000 records per category
+            if len(self._store[category]) > 10_000:
+                self._store[category] = self._store[category][-10_000:]
+
+    async def query(self, category: str,
+                    session_id: str | None = None,
+                    limit: int = 500) -> list:
+        async with self._lock:
+            records = self._store.get(category, [])
+            if session_id:
+                records = [r for r in records if r.get("session_id") == session_id]
+            return records[-limit:]
+
+    async def summary(self) -> dict:
+        """Return record counts per category and per unit."""
+        async with self._lock:
+            out = {}
+            for cat, records in self._store.items():
+                by_unit: dict[str, int] = defaultdict(int)
+                for r in records:
+                    by_unit[r.get("hostname", "?")] += 1
+                out[cat] = {"total": len(records), "by_unit": dict(by_unit)}
+            return out
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +142,7 @@ class C2Server:
         self.operator_port  = operator_port
         self.sessions:  dict[str, Session]  = {}
         self.operators: dict[str, Operator] = {}
+        self.data_store = DataStore()
         self._state_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -96,7 +152,6 @@ class C2Server:
     async def _write(self, writer: asyncio.StreamWriter,
                      lock: asyncio.Lock,
                      msg_type: str, **data):
-        """Thread-safe write to a single stream writer."""
         async with lock:
             try:
                 writer.write(proto.encode(msg_type, **data))
@@ -105,7 +160,6 @@ class C2Server:
                 pass
 
     async def _broadcast_operators(self, msg_type: str, **data):
-        """Send a message to every connected operator."""
         async with self._state_lock:
             ops = list(self.operators.values())
         for op in ops:
@@ -124,7 +178,7 @@ class C2Server:
         write_lock = asyncio.Lock()
 
         try:
-            # --- Auth ---------------------------------------------------
+            # Auth
             line = await asyncio.wait_for(reader.readline(), timeout=10)
             msg  = proto.decode(line)
             if (msg.get("type") != proto.AUTH or
@@ -133,7 +187,7 @@ class C2Server:
                 return
             await self._write(writer, write_lock, proto.AUTH_OK)
 
-            # --- Register -----------------------------------------------
+            # Register
             line = await asyncio.wait_for(reader.readline(), timeout=10)
             msg  = proto.decode(line)
             if msg.get("type") != proto.REGISTER:
@@ -147,6 +201,7 @@ class C2Server:
                 user         = msg.get("user",         "unknown"),
                 capabilities = msg.get("capabilities", []),
                 connected_at = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                role         = proto.ROLE_IDLE,
                 locked_by    = None,
                 reader       = reader,
                 writer       = writer,
@@ -158,19 +213,46 @@ class C2Server:
             log.info(f"[+] Session {session_id} — {session.platform}@{session.hostname} ({session.user})")
             await self._broadcast_operators(proto.SESSION_NEW, session=session.to_dict())
 
-            # --- Relay output -> locked operator ------------------------
+            # Message loop — route output to operators, ingest data records
             while True:
                 line = await reader.readline()
                 if not line:
                     break
-                msg = proto.decode(line)
-                async with self._state_lock:
-                    op_id = session.locked_by
-                    op    = self.operators.get(op_id) if op_id else None
-                if op:
-                    mtype = msg.get("type", proto.OUTPUT)
-                    await self._write(op.writer, op.write_lock, mtype,
-                                      **{k: v for k, v in msg.items() if k != "type"})
+                msg   = proto.decode(line)
+                mtype = msg.get("type")
+
+                # Structured data push from agent
+                if mtype == proto.DATA:
+                    category = msg.get("category", "unknown")
+                    records  = msg.get("records",  [])
+                    await self.data_store.ingest(
+                        session.id, session.hostname, category, records)
+                    # Broadcast a lightweight notification to all operators
+                    await self._broadcast_operators(
+                        proto.DATA,
+                        category   = category,
+                        session_id = session.id,
+                        hostname   = session.hostname,
+                        count      = len(records),
+                    )
+
+                elif mtype == proto.TASK_ACK:
+                    role = msg.get("role", "")
+                    async with self._state_lock:
+                        session.role = role
+                    log.info(f"Session {session.id} task ACK: {role}")
+                    await self._broadcast_operators(
+                        proto.SESSION_NEW, session=session.to_dict())
+
+                # Command output / done — route to locked operator
+                elif mtype in (proto.OUTPUT, proto.DONE, proto.ERROR):
+                    async with self._state_lock:
+                        op_id = session.locked_by
+                        op    = self.operators.get(op_id) if op_id else None
+                    if op:
+                        await self._write(op.writer, op.write_lock, mtype,
+                                          **{k: v for k, v in msg.items()
+                                             if k != "type"})
 
         except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.TimeoutError):
             pass
@@ -184,7 +266,8 @@ class C2Server:
                     if op_id and op_id in self.operators:
                         self.operators[op_id].session_id = None
                 log.info(f"[-] Session {session.id} disconnected")
-                await self._broadcast_operators(proto.SESSION_GONE, session_id=session.id)
+                await self._broadcast_operators(proto.SESSION_GONE,
+                                                session_id=session.id)
             writer.close()
 
     # ------------------------------------------------------------------
@@ -200,7 +283,7 @@ class C2Server:
         write_lock = asyncio.Lock()
 
         try:
-            # --- Auth ---------------------------------------------------
+            # Auth
             line = await asyncio.wait_for(reader.readline(), timeout=10)
             msg  = proto.decode(line)
             if (msg.get("type") != proto.AUTH or
@@ -209,7 +292,7 @@ class C2Server:
                 return
             await self._write(writer, write_lock, proto.AUTH_OK)
 
-            op_id = str(uuid.uuid4())[:8].upper()
+            op_id   = str(uuid.uuid4())[:8].upper()
             op_name = msg.get("name", f"op-{op_id}")
             operator = Operator(
                 id           = op_id,
@@ -223,10 +306,11 @@ class C2Server:
             async with self._state_lock:
                 self.operators[op_id] = operator
             log.info(f"[+] Operator {op_name} ({op_id}) connected")
-            await self._broadcast_operators(proto.OPERATORS,
-                                            data=[o.to_dict() for o in self.operators.values()])
+            await self._broadcast_operators(
+                proto.OPERATORS,
+                data=[o.to_dict() for o in self.operators.values()])
 
-            # --- Command loop -------------------------------------------
+            # Command loop
             while True:
                 line = await reader.readline()
                 if not line:
@@ -234,19 +318,19 @@ class C2Server:
                 msg   = proto.decode(line)
                 mtype = msg.get("type")
 
-                # ---- sessions ------------------------------------------
+                # sessions
                 if mtype == proto.SESSIONS:
                     async with self._state_lock:
                         data = [s.to_dict() for s in self.sessions.values()]
                     await self._write(writer, write_lock, proto.SESSIONS, data=data)
 
-                # ---- operators -----------------------------------------
+                # operators
                 elif mtype == proto.OPERATORS:
                     async with self._state_lock:
                         data = [o.to_dict() for o in self.operators.values()]
                     await self._write(writer, write_lock, proto.OPERATORS, data=data)
 
-                # ---- interact ------------------------------------------
+                # interact
                 elif mtype == proto.INTERACT:
                     sid = msg.get("session_id", "")
                     async with self._state_lock:
@@ -255,12 +339,11 @@ class C2Server:
                             err = f"Session {sid} not found"
                         elif sess.locked_by and sess.locked_by != op_id:
                             locker = self.operators.get(sess.locked_by)
-                            err = f"Session locked by {locker.name if locker else sess.locked_by}"
+                            err = f"Locked by {locker.name if locker else sess.locked_by}"
                         else:
-                            # Release previous session
                             if operator.session_id and operator.session_id in self.sessions:
                                 self.sessions[operator.session_id].locked_by = None
-                            sess.locked_by   = op_id
+                            sess.locked_by      = op_id
                             operator.session_id = sid
                             err = None
                     if err:
@@ -269,7 +352,7 @@ class C2Server:
                         await self._write(writer, write_lock, proto.INTERACT_OK,
                                           session=sess.to_dict())
 
-                # ---- release -------------------------------------------
+                # release
                 elif mtype == proto.RELEASE:
                     async with self._state_lock:
                         if operator.session_id and operator.session_id in self.sessions:
@@ -277,7 +360,7 @@ class C2Server:
                         operator.session_id = None
                     await self._write(writer, write_lock, proto.DONE)
 
-                # ---- command (forward to agent) ------------------------
+                # forward command to locked agent
                 elif mtype == proto.COMMAND:
                     async with self._state_lock:
                         sid  = operator.session_id
@@ -289,7 +372,70 @@ class C2Server:
                         await self._write(sess.writer, sess.write_lock, proto.COMMAND,
                                           cmd=msg.get("cmd", ""), args=msg.get("args", {}))
 
-                # ---- ping ----------------------------------------------
+                # assign task/role to a session
+                elif mtype == proto.TASK_ASSIGN:
+                    sid  = msg.get("session_id", "")
+                    role = msg.get("role", proto.ROLE_IDLE)
+                    cfg  = msg.get("config", {})
+                    async with self._state_lock:
+                        sess = self.sessions.get(sid)
+                    if not sess:
+                        await self._write(writer, write_lock, proto.ERROR,
+                                          reason=f"Session {sid} not found")
+                    elif role not in proto.ALL_ROLES:
+                        await self._write(writer, write_lock, proto.ERROR,
+                                          reason=f"Unknown role '{role}'. Valid: {proto.ALL_ROLES}")
+                    else:
+                        await self._write(sess.writer, sess.write_lock,
+                                          proto.TASK, role=role, config=cfg)
+                        await self._write(writer, write_lock, proto.TASK_ACK,
+                                          session_id=sid, role=role)
+                        log.info(f"Task '{role}' assigned to session {sid} by {operator.name}")
+
+                # list current task roles
+                elif mtype == proto.TASKS:
+                    async with self._state_lock:
+                        data = [
+                            {"session_id": s.id, "hostname": s.hostname,
+                             "platform": s.platform, "role": s.role}
+                            for s in self.sessions.values()
+                        ]
+                    await self._write(writer, write_lock, proto.TASKS, data=data)
+
+                # broadcast command to group of agents
+                elif mtype == proto.BROADCAST:
+                    filt    = msg.get("filter", "all")   # "all" | "tms" | "knightmare" | role name
+                    cmd_str = msg.get("cmd", "")
+                    async with self._state_lock:
+                        targets = self._filter_sessions(filt)
+                    sent_to = []
+                    for sess in targets:
+                        await self._write(sess.writer, sess.write_lock,
+                                          proto.COMMAND, cmd=cmd_str, args={})
+                        sent_to.append(sess.id)
+                    await self._write(writer, write_lock, proto.BROADCAST_OK,
+                                      sent_to=sent_to, count=len(sent_to))
+
+                # data store query
+                elif mtype == proto.DATA_QUERY:
+                    category   = msg.get("category",   "")
+                    session_flt= msg.get("session_id", None)
+                    limit      = msg.get("limit",      500)
+
+                    if category == "summary":
+                        summary = await self.data_store.summary()
+                        await self._write(writer, write_lock, proto.DATA_RESP,
+                                          category="summary", records=summary)
+                    elif category in proto.ALL_CATEGORIES:
+                        records = await self.data_store.query(category, session_flt, limit)
+                        await self._write(writer, write_lock, proto.DATA_RESP,
+                                          category=category, records=records,
+                                          total=len(records))
+                    else:
+                        await self._write(writer, write_lock, proto.ERROR,
+                                          reason=f"Unknown category '{category}'. "
+                                                 f"Valid: summary, {', '.join(proto.ALL_CATEGORIES)}")
+
                 elif mtype == proto.PING:
                     await self._write(writer, write_lock, proto.PONG)
 
@@ -307,28 +453,43 @@ class C2Server:
             writer.close()
 
     # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _filter_sessions(self, filt: str) -> list[Session]:
+        """Return sessions matching filter. Must be called with _state_lock held."""
+        sessions = list(self.sessions.values())
+        if filt == "all":
+            return sessions
+        if filt in (proto.PLATFORM_TMS, proto.PLATFORM_KNIGHTMARE):
+            return [s for s in sessions if s.platform == filt]
+        if filt in proto.ALL_ROLES:
+            return [s for s in sessions if s.role == filt]
+        # Try exact session ID
+        return [s for s in sessions if s.id == filt]
+
+    # ------------------------------------------------------------------
     # Start
     # ------------------------------------------------------------------
 
     async def start(self):
         cert_path, key_path = _ensure_certs()
 
-        def _ssl(server_side: bool) -> ssl.SSLContext:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER if server_side
-                                 else ssl.PROTOCOL_TLS_CLIENT)
+        def _make_ssl() -> ssl.SSLContext:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(cert_path, key_path)
             return ctx
 
         agent_srv    = await asyncio.start_server(
-            self.handle_agent,    "0.0.0.0", self.agent_port,    ssl=_ssl(True))
+            self.handle_agent,    "0.0.0.0", self.agent_port,    ssl=_make_ssl())
         operator_srv = await asyncio.start_server(
-            self.handle_operator, "0.0.0.0", self.operator_port, ssl=_ssl(True))
+            self.handle_operator, "0.0.0.0", self.operator_port, ssl=_make_ssl())
 
         print(_banner())
         log.info(f"Agent listener    : 0.0.0.0:{self.agent_port}")
         log.info(f"Operator listener : 0.0.0.0:{self.operator_port}")
         log.info(f"Certificate       : {cert_path}")
-        log.info("Ready.")
+        log.info("Ready — waiting for agents and operators.")
 
         async with agent_srv, operator_srv:
             await asyncio.gather(
@@ -358,7 +519,7 @@ def _generate_self_signed(cert_path: str, key_path: str):
     from cryptography.hazmat.primitives.asymmetric import rsa
 
     log.info("Generating self-signed TLS certificate (10-year validity)…")
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key  = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "knightmare-c2")])
     now  = datetime.datetime.utcnow()
     cert = (
@@ -383,8 +544,8 @@ def _generate_self_signed(cert_path: str, key_path: str):
             serialization.PrivateFormat.TraditionalOpenSSL,
             serialization.NoEncryption(),
         ))
-    log.info(f"Certificate saved → {cert_path}")
-    log.info("Distribute server.crt to agents and operators (--cert flag).")
+    log.info(f"Certificate saved  → {cert_path}")
+    log.info("Distribute server.crt to all agents and operators (--cert flag).")
 
 
 def _banner() -> str:
@@ -396,7 +557,7 @@ def _banner() -> str:
 ██║  ██╗██║ ╚████║██║╚██████╔╝██║  ██║   ██║   ██║ ╚═╝ ██║██║  ██║██║  ██║███████╗
 ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝
 
-  C2 Server — Tengu Edition  |  Sliver-inspired  |  Multi-operator
+  C2 Teamserver — Tengu Edition  |  Multi-operator  |  WPA3 Research
 """
 
 
@@ -407,8 +568,9 @@ def _banner() -> str:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Knightmare C2 Server")
-    parser.add_argument("--password",      required=True,               help="Shared operator/agent password")
+    parser = argparse.ArgumentParser(description="Knightmare C2 Teamserver")
+    parser.add_argument("--password",      required=True,
+                        help="Shared operator/agent password")
     parser.add_argument("--agent-port",    type=int, default=proto.AGENT_PORT,    metavar="PORT")
     parser.add_argument("--operator-port", type=int, default=proto.OPERATOR_PORT, metavar="PORT")
     args = parser.parse_args()

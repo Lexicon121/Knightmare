@@ -1,0 +1,27 @@
+name: Dragonfly SAE Timing Attack
+description: >
+  Measures WPA3 SAE (Dragonfly) commit and confirm timing via Vanhoef's
+  patched wpa_supplicant. Detects cache-based and timing side-channels
+  as described in the Dragonblood research (CVE-2019-9494, CVE-2019-9496).
+  Ref: https://wpa3.mathyvanhoef.com/
+icarus: C
+requires:
+  - dragonblood toolkit (https://github.com/vanhoefm/dragonblood)
+  - Patched wpa_supplicant with SAE timing logging
+  - Monitor-capable wireless interface
+options:
+  interface: wlan1
+  target_bssid: ""
+  group: "19"
+  tool_path: /opt/dragonblood/dragonslayer.py
+  log_path: /tmp/dragonfly_timing.log
+  duration: "60"
+payloads:
+  - start_timing_capture
+  - stop_capture
+  - analyze_timing
+notes: >
+  Set interface to a dedicated monitor-capable adapter separate from
+  the adapter used for C2 backhaul. target_bssid can be left empty
+  to observe all WPA3 APs in range. Results stream to C2 data store
+  under category 'sae_timing'.

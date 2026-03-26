@@ -237,10 +237,18 @@ Knightmare/
 │   ├── exploit_loader.py
 │   └── payload_manager.py
 ├── modules/
-│   └── esp32/
-│       ├── scan_wifi.yaml
-│       ├── deauth_attack.yaml
-│       └── beacon_spam.yaml
+│   ├── esp32/
+│   │   ├── scan_wifi.yaml
+│   │   ├── deauth_attack.yaml
+│   │   └── beacon_spam.yaml
+│   ├── wpa3/
+│   │   ├── dragonfly_timing.yaml
+│   │   └── sae_capture.yaml
+│   └── wireless/
+│       ├── kismet.yaml
+│       ├── bettercap.yaml
+│       ├── evil_portal.yaml
+│       └── espectre.yaml
 ├── payloads/
 │   └── reverse_shell.py
 ├── logs/
@@ -272,14 +280,65 @@ Knightmare modules are aligned to the ICARUS offensive framework pillars:
 
 ---
 
-## Credits
+## Credits & Acknowledgements
 
-- Built by Lexie Thach ([@Lexicon121](https://github.com/Lexicon121))
-- ESP32 Marauder by [@justcallmekoko](https://github.com/justcallmekoko/ESP32Marauder)
-- Inspired by [Sliver](https://github.com/BishopFox/sliver), [Ligolo-ng](https://github.com/nicocha30/ligolo-ng), Metasploit, and MITRE ATT&CK
+**Built by** Lexie Thach ([@Lexicon121](https://github.com/Lexicon121))
+
+---
+
+### C2 / Framework Inspiration
+
+| Project | Author | Description |
+|---------|--------|-------------|
+| [Sliver](https://github.com/BishopFox/sliver) | [BishopFox](https://github.com/bishopfox) | Multi-operator C2 framework — inspired Knightmare's teamserver architecture and operator model |
+| [Ligolo-ng](https://github.com/nicocha30/ligolo-ng) | [nicocha30](https://github.com/nicocha30) | Reverse tunnel agent model — inspired Knightmare's reverse-connect TLS agent design |
+| [Metasploit Framework](https://github.com/rapid7/metasploit-framework) | [Rapid7](https://github.com/rapid7) | Inspired the local CLI structure, module system, and YAML exploit format |
+| [MITRE ATT&CK](https://attack.mitre.org/) | MITRE | Adversarial TTP taxonomy used for ICARUS pillar alignment |
+
+---
+
+### Hardware & Firmware
+
+| Project | Author | Description |
+|---------|--------|-------------|
+| [ESP32 Marauder](https://github.com/justcallmekoko/ESP32Marauder) | [justcallmekoko](https://github.com/justcallmekoko) | ESP32 WiFi/Bluetooth offensive toolkit — serial backend for esp32 modules and evil portal |
+| [ESPectre](https://github.com/francescopace/espectre) | [francescopace](https://github.com/francescopace) | WiFi CSI-based motion and presence detection using ESP32 — powers the `espectre` role |
+| [pymavlink](https://github.com/ArduPilot/pymavlink) | [ArduPilot](https://github.com/ArduPilot) | MAVLink protocol implementation — drone C2 and telemetry support |
+
+---
+
+### WPA3 / Dragonfly Research
+
+| Project | Author | Description |
+|---------|--------|-------------|
+| [Dragonblood](https://github.com/vanhoefm/dragonblood) | [Mathy Vanhoef](https://github.com/vanhoefm) | WPA3 SAE (Dragonfly) side-channel and denial-of-service research — dragonslayer, dragondrain tooling |
+| [wpa3.mathyvanhoef.com](https://wpa3.mathyvanhoef.com/) | Mathy Vanhoef | WPA3 Dragonfly vulnerability disclosure and research reference |
+| [hcxdumptool](https://github.com/ZerBea/hcxdumptool) | [ZerBea](https://github.com/ZerBea) | Active packet capture tool for WPA/WPA2/WPA3 frame collection |
+| [hcxtools](https://github.com/ZerBea/hcxtools) | [ZerBea](https://github.com/ZerBea) | Conversion and analysis tools for pcapng captures including SAE frames |
+
+---
+
+### Wireless / Network Tools
+
+| Project | Author | Description |
+|---------|--------|-------------|
+| [Kismet](https://github.com/kismetwireless/kismet) | [dragorn](https://github.com/dragorn) | Passive 802.11 / Bluetooth / RF monitoring — powers the `kismet` role and network data streaming |
+| [Bettercap](https://github.com/bettercap/bettercap) | [evilsocket](https://github.com/evilsocket) | Network attack and monitoring framework — WPA handshake capture and HTTP credential monitoring |
+| [Aircrack-ng](https://github.com/aircrack-ng/aircrack-ng) | [Aircrack-ng team](https://github.com/aircrack-ng) | 802.11 WEP/WPA/WPA2 cracking suite — used for monitor mode and packet injection |
+
+---
+
+### Python Libraries
+
+| Library | Repo | Description |
+|---------|------|-------------|
+| [cryptography](https://github.com/pyca/cryptography) | [PyCA](https://github.com/pyca) | TLS certificate generation for C2 server |
+| [pyserial](https://github.com/pyserial/pyserial) | [pyserial](https://github.com/pyserial/pyserial) | Serial/UART communication with ESP32, Arduino, and other hardware |
+| [PyYAML](https://github.com/yaml/pyyaml) | [YAML](https://github.com/yaml) | Module configuration parsing |
+| [pymavlink](https://github.com/ArduPilot/pymavlink) | [ArduPilot](https://github.com/ArduPilot) | MAVLink protocol for drone command and control |
 
 ---
 
 ## Disclaimer
 
-For educational purposes and authorized security testing only. Only use against systems you own or have explicit written permission to test.
+For educational purposes and authorized security testing only. Only use against systems you own or have explicit written permission to test. All referenced tools and frameworks are the property of their respective authors — see individual project licenses before use.

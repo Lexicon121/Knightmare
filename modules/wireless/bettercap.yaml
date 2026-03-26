@@ -1,0 +1,29 @@
+name: Bettercap WiFi / Network Analysis
+description: >
+  Manages a Bettercap session on the TMS unit for WPA/WPA2 handshake
+  capture, WiFi client deauth, and HTTP credential monitoring.
+  Handshakes and portal captures stream to the C2 data store under
+  categories 'handshakes' and 'portals'.
+icarus: C
+requires:
+  - bettercap (install via Install/install_active_wireless.sh)
+  - hcxpcapngtool (for handshake parsing)
+  - Monitor-capable wireless interface
+options:
+  interface: wlan1
+  caplet: /etc/bettercap/wifi-handshakes.cap
+  rest_host: 127.0.0.1
+  rest_port: "8081"
+  rest_user: user
+  rest_pass: pass
+  handshake_dir: /root/bettercap-handshakes
+payloads:
+  - start_bettercap
+  - stop_bettercap
+  - deauth_all
+  - handshake_capture
+notes: >
+  Set BETTERCAP_USER and BETTERCAP_PASS env vars on the TMS unit to
+  match the caplet configuration. Handshakes are parsed via hcxpcapngtool
+  and pushed to C2. For authorized testing only. Assign role with:
+    assign <session_id> bettercap {"interface":"wlan1"}

@@ -1,0 +1,42 @@
+name: ESPectre CSI Presence Detection
+description: >
+  Deploys ESPectre on an ESP32 (S3, C6, or C3) to perform passive
+  WiFi Channel State Information (CSI) based motion and presence
+  detection. Detects human activity in monitored areas without cameras
+  or microphones by analysing signal distortion on existing 2.4GHz WiFi.
+  Presence events stream to the C2 data store under category 'presence'.
+  Ref: https://github.com/francescopace/espectre
+icarus: I
+requires:
+  - ESP32 with CSI support (S3, C6, C3 recommended)
+  - ESPectre firmware flashed via esptool / PlatformIO
+  - Serial connection to TMS OR MQTT broker on local network
+options:
+  mode: serial
+  port: /dev/ttyUSB1
+  baud: "115200"
+  mqtt_host: localhost
+  mqtt_topic: espectre/motion
+  threshold: "0.5"
+  algorithm: mvs
+payloads:
+  - start_detection
+  - stop_detection
+  - calibrate
+notes: >
+  mode: 'serial' reads Micro-ESPectre JSON lines from UART.
+  mode: 'mqtt'   subscribes to mqtt_topic via paho-mqtt.
+
+  Micro-ESPectre output format (one JSON line per reading):
+    {"movement_score": 0.42, "presence": true}
+
+  Multiple TMS units running ESPectre simultaneously provide spatial
+  presence mapping across a site. Query the aggregated data with:
+    data presence
+
+  Assign role from operator console:
+    assign <session_id> espectre {"mode":"serial","port":"/dev/ttyUSB1"}
+    assign <session_id> espectre {"mode":"mqtt","mqtt_host":"192.168.1.10"}
+
+  Calibration: point the ESP32 at an empty space and run 'calibrate'
+  to establish a baseline before monitoring for presence.

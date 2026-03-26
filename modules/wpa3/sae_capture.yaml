@@ -1,0 +1,27 @@
+name: WPA3 SAE Handshake Capture
+description: >
+  Passively captures WPA3 SAE (Simultaneous Authentication of Equals)
+  commit and confirm frames using a monitor-mode interface.
+  Captured frames are written to pcap for offline analysis with
+  hcxtools or Wireshark. Pairs with dragonfly_timing for full
+  Dragonblood-style analysis.
+icarus: I
+requires:
+  - aircrack-ng suite (airodump-ng)
+  - hcxdumptool
+  - Monitor-capable wireless interface with 802.11ac or ax support
+options:
+  interface: wlan1
+  channel: "6"
+  output_dir: /tmp/sae_captures
+  target_bssid: ""
+  duration: "120"
+payloads:
+  - start_capture
+  - stop_capture
+  - export_hcx
+notes: >
+  For WPA3-only networks use hcxdumptool with --enable_status=3 to
+  capture SAE frames. Output pcap can be analysed with hcxpcapngtool
+  or imported into the C2 data store as 'handshakes'. Ensure the
+  interface supports 802.11ax (WiFi 6) if targeting WPA3-only APs.

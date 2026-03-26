@@ -1,0 +1,26 @@
+name: Kismet Passive WiFi Recon
+description: >
+  Controls a Kismet daemon on the TMS unit for passive 802.11 monitoring.
+  Discovered networks and clients stream continuously to the C2 data store
+  under categories 'networks' and 'clients'. Supports multi-unit mesh
+  aggregation — run on several TMS units simultaneously and query combined
+  results with 'data networks' from the operator console.
+icarus: I
+requires:
+  - kismet (install via Install/install_passive_recon.sh)
+  - Monitor-capable wireless interface
+options:
+  interface: wlan1
+  channels: "1,6,11,36,40,44,48"
+  log_dir: /tmp/kismet_logs
+  rest_port: "2501"
+  hop_rate: "5/sec"
+payloads:
+  - start_kismet
+  - stop_kismet
+  - channel_lock
+notes: >
+  Kismet REST API runs on localhost:2501. The C2 agent polls this API
+  every 30 seconds and pushes parsed records. For 5GHz scanning ensure
+  the interface supports 802.11a/n/ac. Assign role with:
+    assign <session_id> kismet {"interface":"wlan1"}
