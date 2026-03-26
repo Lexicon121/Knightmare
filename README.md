@@ -13,32 +13,81 @@ Designed to operate alongside [Tengu Marauder Stryker (TMS)](https://github.com/
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Knightmare C2                        │
-│                                                          │
-│  ┌──────────────┐          ┌───────────────────────┐    │
-│  │  Agent Port  │          │   Operator Port        │    │
-│  │  :31337      │          │   :31338               │    │
-│  └──────┬───────┘          └──────────┬────────────┘    │
-│         │  TLS                        │  TLS             │
-└─────────┼────────────────────────────┼──────────────────┘
-          │                            │
-    ┌─────┴──────┐              ┌──────┴────────┐
-    │  Agents    │              │  Operators    │
-    │            │              │               │
-    │ Knightmare │              │  operator 1   │
-    │   agent    │              │  operator 2   │
-    │            │              │  operator N   │
-    │ TMS agent  │              └───────────────┘
-    │ (Pi robot) │
-    └────────────┘
+```mermaid
+graph TB
+    subgraph C2["Knightmare C2 Teamserver"]
+        direction TB
+        AP["Agent Listener\n:31337 TLS"]
+        OP["Operator Listener\n:31338 TLS"]
+        DS[("Data Store\nnetworks · handshakes\nsae_timing · portals\nbluetooth · presence")]
+        TM["Task Manager\nrole assignment\nbroadcast"]
+        AP --- DS
+        AP --- TM
+        OP --- DS
+        OP --- TM
+    end
+
+    subgraph Agents["Agents  —  reverse TLS connect-back"]
+        KA["Knightmare Agent\nESP32 · HackRF · UART"]
+        TMS["TMS Unit\nPi Robot"]
+    end
+
+    subgraph Operators["Operators"]
+        O1["operator 1"]
+        O2["operator 2"]
+        ON["operator N"]
+    end
+
+    KA  -- "reverse TLS" --> AP
+    TMS -- "reverse TLS" --> AP
+    O1  -- "TLS" --> OP
+    O2  -- "TLS" --> OP
+    ON  -- "TLS" --> OP
 ```
 
 - **Agents** initiate reverse TLS connections to the C2 server — no inbound firewall rules needed on the agent side.
 - **Operators** connect to the C2 server from anywhere and share a live session list.
 - **Session locking** — one operator interacts with an agent at a time; others observe.
 - **TLS** — self-signed certificate auto-generated on first server start. Distribute `c2/certs/server.crt` to agents and operators.
+
+---
+
+## Multi-Unit Mesh Operation
+
+A typical deployment with 5 TMS units on a shared OpenWRT research network, each assigned a different role:
+
+```mermaid
+graph TB
+    subgraph NET["OpenWRT Research Network"]
+        subgraph C2["Knightmare C2 Teamserver"]
+            SRV["Teamserver\nData Store · Task Manager"]
+        end
+
+        TMS1["TMS Unit A\nrole: kismet\nPassive 802.11 recon"]
+        TMS2["TMS Unit B\nrole: bettercap\nHandshake capture"]
+        TMS3["TMS Unit C\nrole: dragonfly\nWPA3 SAE research"]
+        TMS4["TMS Unit D\nrole: espectre\nCSI presence detection"]
+        TMS5["TMS Unit E\nrole: evil_portal\nCredential capture"]
+    end
+
+    OPS["Operators\nmulti-operator console"]
+
+    TMS1 -- "networks · clients" --> SRV
+    TMS2 -- "handshakes · portals" --> SRV
+    TMS3 -- "sae_timing" --> SRV
+    TMS4 -- "presence" --> SRV
+    TMS5 -- "portals" --> SRV
+    SRV  <-- "commands · data queries" --> OPS
+```
+
+Operators query the aggregated data store across all units simultaneously:
+
+```
+knightmare> data summary          # counts from all 5 units
+knightmare> data networks         # all SSIDs seen across the mesh
+knightmare> data sae_timing       # Dragonfly timing from unit C
+knightmare> data presence         # motion events from unit D
+```
 
 ---
 
@@ -54,6 +103,51 @@ Designed to operate alongside [Tengu Marauder Stryker (TMS)](https://github.com/
 - TLS-encrypted operator and agent channels
 - Persistent activity logging
 - Integration with Tengu Marauder Stryker (TMS)
+
+---
+
+## Message Protocol Flow
+
+How an agent connects, gets tasked, and streams data back to operators:
+
+```mermaid
+sequenceDiagram
+    participant A as Agent / TMS Unit
+    participant S as C2 Teamserver
+    participant O as Operator
+
+    A->>S: AUTH (password hash)
+    S->>A: AUTH_OK
+    A->>S: REGISTER (platform, hostname, capabilities)
+    S->>A: REGISTER_OK (session_id)
+    S-->>O: SESSION_NEW (broadcast)
+
+    O->>S: INTERACT (session_id)
+    S->>O: INTERACT_OK  [session locked]
+
+    O->>S: COMMAND ("scan network")
+    S->>A: COMMAND (forwarded)
+    A->>S: OUTPUT (data lines...)
+    A->>S: DONE
+    S->>O: OUTPUT + DONE (forwarded)
+
+    O->>S: TASK_ASSIGN (session_id, role="kismet")
+    S->>A: TASK (role="kismet", config)
+    A->>S: TASK_ACK (role="kismet")
+    S-->>O: SESSION_NEW update (broadcast)
+
+    loop Every 30 s
+        A->>S: DATA (category="networks", records=[...])
+        S-->>O: DATA notification (broadcast)
+    end
+
+    O->>S: DATA_QUERY (category="networks")
+    S->>O: DATA_RESP (aggregated records from all units)
+
+    O->>S: BROADCAST (filter="tms", cmd="status")
+    S->>A: COMMAND (fanned out to all TMS sessions)
+    S->>O: BROADCAST_OK (sent_to=[...])
+```
 
 ---
 
@@ -219,6 +313,31 @@ knightmare> log show
 
 ---
 
+## Module Hierarchy
+
+```mermaid
+graph TD
+    M["modules/"]
+
+    M --> ESP["esp32/"]
+    M --> WPA["wpa3/"]
+    M --> WL["wireless/"]
+
+    ESP --> SW["scan_wifi.yaml\nICARUS: I — Intelligence"]
+    ESP --> DA["deauth_attack.yaml\nICARUS: C — Cyber TTPs"]
+    ESP --> BS["beacon_spam.yaml\nICARUS: C — Cyber TTPs"]
+
+    WPA --> DT["dragonfly_timing.yaml\nICARUS: C — SAE timing side-channel"]
+    WPA --> SC["sae_capture.yaml\nICARUS: I — WPA3 frame capture"]
+
+    WL --> KI["kismet.yaml\nICARUS: I — Passive recon"]
+    WL --> BC["bettercap.yaml\nICARUS: C — Handshake capture"]
+    WL --> EP["evil_portal.yaml\nICARUS: C — Credential capture"]
+    WL --> ES["espectre.yaml\nICARUS: I — CSI presence detection"]
+```
+
+---
+
 ## Directory Structure
 
 ```
@@ -263,14 +382,40 @@ Knightmare/
 
 Knightmare modules are aligned to the ICARUS offensive framework pillars:
 
-| Pillar | Focus |
-|--------|-------|
-| **I** — Intelligence | Adversary profiling, CVEs, telemetry, threat feeds |
-| **C** — Cyber TTPs | ATT&CK tactics adapted for drones, robots, and IoT |
-| **A** — Aerial/Aquatic | GPS spoofing, anti-jamming, telemetry hijacking |
-| **R** — Resilience | Firmware hardening, recovery protocol analysis |
-| **U** — Unmanned Ops | SOP enforcement, comm security, system auth |
-| **S** — Systems Monitoring | Anomaly detection, alerting, C2 feedback loops |
+```mermaid
+mindmap
+  root((ICARUS))
+    I — Intelligence
+      Adversary profiling
+      CVE tracking
+      Passive WiFi recon via Kismet
+      CSI presence detection via ESPectre
+      WPA3 SAE frame capture
+    C — Cyber TTPs
+      ATT&CK for drones and IoT
+      Deauth attacks via ESP32
+      WPA3 Dragonfly side-channel
+      Bettercap handshake capture
+      Evil portal credential harvesting
+    A — Aerial & Aquatic
+      GPS spoofing
+      MAVLink telemetry hijack
+      Anti-jamming analysis
+      Drone command interception
+    R — Resilience
+      Firmware hardening analysis
+      Recovery protocol testing
+      Serial device enumeration
+    U — Unmanned Ops
+      SOP enforcement
+      Comm security assessment
+      System authentication review
+    S — Systems Monitoring
+      Anomaly detection
+      Aggregated C2 data store
+      Multi-unit telemetry
+      Real-time operator alerts
+```
 
 ---
 
