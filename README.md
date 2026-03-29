@@ -382,40 +382,14 @@ Knightmare/
 
 Knightmare modules are aligned to the ICARUS offensive framework pillars:
 
-```mermaid
-mindmap
-  root((ICARUS))
-    I — Intelligence
-      Adversary profiling
-      CVE tracking
-      Passive WiFi recon via Kismet
-      CSI presence detection via ESPectre
-      WPA3 SAE frame capture
-    C — Cyber TTPs
-      ATT&CK for drones and IoT
-      Deauth attacks via ESP32
-      WPA3 Dragonfly side-channel
-      Bettercap handshake capture
-      Evil portal credential harvesting
-    A — Aerial & Aquatic
-      GPS spoofing
-      MAVLink telemetry hijack
-      Anti-jamming analysis
-      Drone command interception
-    R — Resilience
-      Firmware hardening analysis
-      Recovery protocol testing
-      Serial device enumeration
-    U — Unmanned Ops
-      SOP enforcement
-      Comm security assessment
-      System authentication review
-    S — Systems Monitoring
-      Anomaly detection
-      Aggregated C2 data store
-      Multi-unit telemetry
-      Real-time operator alerts
-```
+| Pillar | Focus |
+|--------|-------|
+| **I** — Intelligence | Adversary profiling, CVEs, telemetry, threat feeds |
+| **C** — Cyber TTPs | ATT&CK tactics adapted for drones, robots, and IoT |
+| **A** — Aerial/Aquatic | GPS spoofing, anti-jamming, telemetry hijacking |
+| **R** — Resilience | Firmware hardening, recovery protocol analysis |
+| **U** — Unmanned Ops | SOP enforcement, comm security, system auth |
+| **S** — Systems Monitoring | Anomaly detection, alerting, C2 feedback loops |
 
 ---
 
